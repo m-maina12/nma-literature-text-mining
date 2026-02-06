@@ -1,0 +1,230 @@
+---
+title: "Text mining of scientific papers: Network meta-analysis"
+author: "Marta Mainetti"
+date: "5th February 2026"
+output:
+  html_document:
+    df_print: paged
+  pdf_document: default
+---
+
+Considering the research topic of my doctoral studies, I decided to analyse the titles of the papers, 
+written in English and currently available on PubMed, regarding **Network meta-analysis**. 
+This means that I am interested in papers that synthesize evidence regarding
+the treatment effects of multiple clinical interventions on a specific health outcome.  
+I did not filter for the type of outcome. 
+
+Let's start with importing the libraries we need for the analysis of the data,
+which are:
+
+- `tidyverse` to manipulate data
+
+- `stringr` to manipulate strings 
+
+- `tm` to analyze the texts through text mining 
+
+- `wordcloud` to represent the results of the text mining as a wordcloud
+
+
+```{r, message = FALSE, warning = FALSE}
+library(tidyverse)
+library(tm)
+library(wordcloud)
+```
+
+
+Now I import the the .csv file downloaded from PubMed that
+contains the information object of the analysis.
+
+```{r}
+setwd("")
+data_raw <- read_csv("csv-networkmet.csv",
+                     show_col_types = F)
+```
+
+Let's see the first record of the dataset
+
+```{r}
+head(data_raw)
+```
+
+The dataset contains several information regarding the paper of interest and,
+since DOI is not available for everyone, I will keep only variables PMID that 
+will be used as ID, and the title, object of the analysis. It will be converted 
+into a character format, in order to avoid ambiguity with numeric. 
+
+```{r}
+df <- data_raw %>% 
+  select(PMID, Title) %>% 
+  rename(doc_id = PMID, text = Title)
+
+df$doc_id <- as.character(df$doc_id)
+```
+
+
+Now I am going to create the corpus of the text and preprocess the data
+for the analysis. In particular, the steps will be:
+
+- Changing capitals letter to low case
+
+- Removing English stopwords
+
+- Removing punctuation
+
+- Strip extra white spaces between words (if present).
+
+- Stem the document, i.e. we bring the words of our text into their stem form
+
+I decided to not remove numbers because they might be important in this context, e.g.
+some papers have COVID-19 as outcome .
+
+```{r}
+corpus_raw <- df %>%
+  DataframeSource() %>% 
+  VCorpus()
+
+names(corpus_raw) <- df$doc_id
+```
+
+
+```{r}
+# Low case
+corpus <- tm_map(x = corpus_raw, FUN = content_transformer(tolower))
+
+# Remove english stopwords
+corpus <- tm_map(x = corpus, FUN = removeWords, stopwords(kind = "en"))
+
+# Remove punctuation
+corpus <- tm_map(x = corpus, FUN = removePunctuation)
+
+# Remove extra white spaces
+corpus <- tm_map(x = corpus, FUN = stripWhitespace)
+
+# Stemming
+corpus <- tm_map(x = corpus, FUN = stemDocument)
+```
+
+Now we are going to create the functions needed to create n-grams. 
+I will include one-gram and bigram. 
+
+Let's define the functions that will create the ngrams from our text
+
+```{r}
+bigramTokenizer <- function(x) {
+  words(x) %>% 
+    ngrams(2) %>% 
+    map_chr(~ str_c(., collapse = ' '))
+  }
+
+Uni.ngramTokenizer <- function(x){
+  c(words(x), bigramTokenizer(x))
+}
+```
+
+# First scenario: n-grams with one and two words
+
+Let's create the document term matrix: I will keep the words with a length > 4,
+and they will be weighted according to the TfIdf theory, i.e. we give more
+weight to words most frequent across titles instead of the most frequent words
+within title. 
+
+```{r}
+dtm <- DocumentTermMatrix(corpus,
+                          control = list(
+                            wordLengths = c(4, Inf), 
+                            weighting   = function(x) weightTfIdf(x, 
+                                                                  normalize = TRUE),
+                            tokenize    = Uni.ngramTokenizer
+                            )
+)
+
+dim(dtm)
+```
+
+We have more than 40,000 tokens, which is almost 5 times the documents we have. 
+
+We can reduce the dimensionality, by removing sparse terms from the DTM:
+
+```{r}
+dtm <- removeSparseTerms(dtm, .99) ; dim(dtm)
+```
+
+Fixing a threshold of 0.99 for the sparseness we went from 43690 to 195, a much
+more reasonable number of tokens for the analysis. 
+
+We can take a look at the most frequent terms within document (with a minimum
+frequency of 10); let's check the first one:
+
+```{r}
+frequentTerms.by.doc <- findMostFreqTerms(x = dtm, n = 10); 
+round(frequentTerms.by.doc[[1]], 3)
+```
+
+
+Look for frequent terms overall, setting the minimum frequency to 40
+
+```{r}
+frequentTerms <- findFreqTerms(x = dtm, lowfreq = 40); frequentTerms
+```
+
+Interesting (and expected) findings refer to:
+
+- The statistical method (bayesian network, metaanalysi random, review network, 
+systemat review)
+
+- The study design and the aims (clinic, compar, compar effect, compar efficaci, etc)
+
+- Interventions (combin, drug, prevent, exercis, inhibitor)
+
+- Outcome / Health condition (cancer, chronic, diabet)
+
+
+Find the association between terms
+
+```{r}
+terms.cor <- findAssocs(x = dtm, terms = frequentTerms, corlimit = 0.25)
+print(terms.cor[lengths(terms.cor) > 0])
+```
+
+Interesting to notice that the association between "breast" and "breast cancer" is
+0.96, meaning that it is very high and probably the only clinical outcome related
+to breast and involved in the network meta-analysis is cancer; however, if we 
+look at the association between "cancer" and "breast cancer", this is 0.44, 
+basically half. 
+This reduction is probably related to the fact that cancer, as clinical outcome, 
+can be related to other body parts, such as lung and prostat, while breast compares
+mainly with "breast cancer". 
+
+Let's create the data and plot the wordcloud:
+ 
+```{r}
+word_frequencies <- dtm %>% 
+  as.matrix %>% 
+  colSums %>% 
+  sort(decreasing = TRUE) %>% 
+  tibble(
+    word   = names(.),
+    weight = .
+  )
+```
+ 
+
+Wordcloud
+
+```{r, warning=FALSE}
+par(mar = c(0, 0, 0, 0))
+wordcloud(words = word_frequencies$word,
+          freq = word_frequencies$weight,
+          random.order = FALSE,
+          rot.per      = .50,
+          colors       = c('navyblue', 'indianred', 'dodgerblue', 
+                           'goldenrod', 'springgreen3',
+                           'darkmagenta'),
+          random.color = TRUE)
+```
+
+
+
+
+
+
